@@ -1,0 +1,1 @@
+OMP_NUM_THREADS=32 ./run -k life -s 1024 -a moultdiehard2474 -v taskloop -nt 32 -n -i 600

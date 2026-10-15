@@ -1,0 +1,1 @@
+OMP_NUM_THREADS=64 ./run -k life -s 8192 -a random -v ompfor -nt 128 -i 10

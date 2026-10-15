@@ -1,0 +1,1 @@
+OMP_NUM_THREADS=32 OMP_SCHEDULE=static OMP_PLACES=cores ./run -k life -s 1024 -v omplazy -a moultdiehard2474 -wt opt -n -i 2470 -tw 8 -th 8

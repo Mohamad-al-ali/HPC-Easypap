@@ -1,0 +1,447 @@
+\documentclass[a4paper,12pt]{article}
+% \usepackage[french]{babel}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{hyperref}
+\usepackage{graphicx}
+\usepackage{tikz}
+\usepackage{pgfplots}
+\usepackage{cite} % Pour la gestion des citations
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{float}
+
+
+\definecolor{codegray}{rgb}{0.5,0.5,0.5}
+\definecolor{codeblue}{rgb}{0.2,0.2,0.8}
+\definecolor{codegreen}{rgb}{0,0.6,0}
+\definecolor{backcolour}{rgb}{0.97,0.97,0.97}
+
+\lstdefinestyle{cstyle}{
+    backgroundcolor=\color{backcolour},
+    commentstyle=\color{codegreen}\itshape,
+    keywordstyle=\color{codeblue}\bfseries,
+    numberstyle=\tiny\color{codegray},
+    stringstyle=\color{red},
+    basicstyle=\ttfamily\footnotesize,
+    breaklines=true,
+    frame=single,
+    rulecolor=\color{black},
+    numbers=left,
+    numbersep=5pt,
+    showstringspaces=false,
+    language=C
+}
+
+
+\lstset{
+  language=C,
+  extendedchars=true,
+  basicstyle=\small\tt,
+  lineskip=-2pt
+}
+\title{
+    \begin{tikzpicture}
+    \node at (0,0) {\includegraphics[width=0.4\columnwidth]{Universite_Bordeaux.jpg}};
+    \end{tikzpicture}
+    \vskip 0.2in \par
+    \textbf{Le jeu de la vie - Rapport OCL Hybride}
+    \vskip 0.5in \par
+    \large{
+        Projet de Programmation Parallèle
+        \vskip 0.15in
+        réalisé par
+        \vskip 0.10in 
+    }
+}
+
+\makeatletter
+\renewcommand*{\@fnsymbol}[1]{%
+  \ifcase#1
+  \or
+  \or
+  \or
+  \or $\star$
+  \or $\dagger\ $
+  \or $\ddagger\ $
+  \else
+  \@ctrerr
+  \fi
+}
+\makeatother
+
+\author{
+    \textbf{Antonin Brauer}\thanks{Email: \texttt{\url{Antonin.brauer@etu.u-bordeaux.fr}}},\\
+    Responsables: Ms Pierre-André Wacrenier, Ms Raymond Namyst.\\[0.5cm]
+}
+
+\date{\today}
+
+\pgfplotsset{compat=1.18}
+
+\begin{document}
+
+\maketitle
+\newpage
+\tableofcontents
+\newpage
+
+\section{Implémentation}
+Afin d'obtenir une version hybride OpenMP et OpenCL, je suis parti en guise de base de la même version du kernel `mandel`.
+
+Il a dont d'abord fallu, désactiver le partage des buffers entre le GPU et le CPU. pour qu'ils puissent travailler chacun de leurs côté et n'avoir que des transferts de données explicites.
+\begin{lstlisting}[style=cstyle, caption=Désactivation des buffers partagés]
+void life_config_ocl_hybrid (char *param)
+{
+  // Force data to be synchronized on host for display
+  easypap_gl_buffer_sharing = 0;
+}
+\end{lstlisting}
+
+Ensuite pour définir le domaine de calcul de chaque partie (CPU/GPU), on utilise un tableau de 2 éléments de type \texttt{ezp\_gpu\_event\_footprint\_t} fourni par easypap, que l'on défini comme suit pour commencer avec une distribution égale du domaine de calcul :
+\begin{lstlisting}[style=cstyle, caption=Définition du domaine de calcul]
+void life_config_ocl_hybrid (char *param)
+{
+  // OpenMP part (top half)
+  kernel_fp[0].x = 0;
+  kernel_fp[0].y = 0;
+  kernel_fp[0].w = DIM;
+  kernel_fp[0].h = (NB_TILES_Y / 2) * TILE_H; // Start with fifty-fifty;
+
+  // GPU part (bottom half)
+  kernel_fp[1].x = 0;
+  kernel_fp[1].y = kernel_fp[0].y + kernel_fp[0].h;
+  kernel_fp[1].w = DIM;
+  kernel_fp[1].h = DIM - kernel_fp[1].y;
+
+  life_init ();
+}
+\end{lstlisting}
+
+La première modification par rapport au kernel `mandel` apparait dans la fonction `life\_refresh\_img` où dès que l'on souhaite afficher ce qui a été calculé par le GPU, il faut récupéré la partie du buffer du GPU dans laquelle se trouve le resultat et le copier dans le buffer du CPU.
+\begin{lstlisting}[style=cstyle, caption=Affichage]
+void life_refresh_img (void)
+{
+  if (gpu_used) {
+    const int gpu_size = DIM * kernel_fp[1].h;
+    const int cpu_size = DIM * kernel_fp[0].h;
+    cl_int err;
+
+    // Read all the GPU side and write it into CPU buffer
+    err = clEnqueueReadBuffer (ocl_queue (0), ocl_cur_buffer (0), CL_TRUE,
+                                cpu_size, gpu_size * sizeof (cell_t),
+                                _table + cpu_size, 0, NULL, NULL);
+    check (err, "Failed to read buffer from GPU");
+  }
+
+  for (int i = 0; i < DIM; i++)
+    for (int j = 0; j < DIM; j++)
+      cur_img (i, j) = cur_table (i, j) * LIFE_COLOR;
+}
+\end{lstlisting}
+
+Ici, il est important d'utiliser correctement les arguments `offset` et `size` de la fonction `clEnqueueReadBuffer` afin de lire seulement la partie du buffer du GPU qui nous interesse, et ne surtout pas écraser ce qui a été calculé par le CPU.
+
+Concernant la fonction `life\_compute\_ocl\_hybrid`. Elle se décompose en plusieurs parties :
+\begin{itemize}
+  \item Calcul côté CPU
+  \item Calcul côté GPU
+  \item Équilibrage des charges
+  \item Échange des bords
+\end{itemize}
+
+\newpage
+\subsection{Calcul CPU}
+Le calcul côté CPU est relativement trivial et n'a demandé que très peu de modification par rapport aux version 100\% CPU.
+La seule différence étant les bornes de calculs qui dépendent de `kernel\_fp`.
+\begin{lstlisting}[style=cstyle, caption=Calcul CPU]
+  unsigned ocl_hybrid_omp ()
+  {
+    unsigned change = 0;
+
+    #pragma omp parallel for collapse(2) schedule(runtime)
+    for (int y = kernel_fp[0].y; y < kernel_fp[0].y + 1 + kernel_fp[0].h;
+    y += TILE_H)
+    for (int x = kernel_fp[0].x; x < kernel_fp[0].x + kernel_fp[0].w;
+    x += TILE_W)
+    change |= do_tile (x, y, TILE_W, TILE_H);
+
+    return change;
+    }
+  \end{lstlisting}
+  On notera en ligne 6 le `+1` correspondant au bord partagé avec le GPU.
+
+\subsection{Calcul GPU}
+
+\begin{lstlisting}[style=cstyle, caption=Kernel GPU]
+__kernel void life_ocl_hybrid (__global char *in, __global char *out, unsigned startingY)
+{
+  int x    = get_global_id (0);
+  int y    = get_global_id (1) + startingY;
+  int xloc = get_local_id (0);
+  int yloc = get_local_id (1);
+
+  if (x == 0 || y == 0 || x == DIM - 1 || y == DIM - 1) return;
+
+  unsigned me, n;
+
+    me = in[y * DIM + x];
+    n  = in[(y - 1) * DIM + x - 1]
+        + in[(y - 1) * DIM + x]
+        + in[(y - 1) * DIM + x + 1]
+        + in[y * DIM + x - 1]
+        + in[y * DIM + x + 1]
+        + in[(y + 1) * DIM + x - 1]
+        + in[(y + 1) * DIM + x]
+        + in[(y + 1) * DIM + x + 1];
+
+    out[y * DIM + x] = (n == 3) || (me && (n == 2));
+}
+\end{lstlisting}
+
+\begin{lstlisting}[style=cstyle, caption=Setup GPU]
+void ocl_hybrid_ocl_launch (size_t global[2], size_t local[2])
+{
+  cl_int err = 0;
+
+  // Set kernel arguments
+  err |= clSetKernelArg (ocl_compute_kernel (0), 0, sizeof (cl_mem),
+                         &ocl_cur_buffer (0));
+  err |= clSetKernelArg (ocl_compute_kernel (0), 1, sizeof (cl_mem),
+                         &ocl_next_buffer (0));
+  err |= clSetKernelArg (ocl_compute_kernel (0), 2, sizeof (unsigned),
+                         &kernel_fp[1].y);
+  check (err, "Failed to set kernel arguments");
+
+  // Launch GPU kernel
+  err = clEnqueueNDRangeKernel (ocl_queue (0), ocl_compute_kernel (0), 2, NULL,
+                                global, local, 0, NULL,
+                                ezp_ocl_eventptr (EVENT_START_KERNEL, 0));
+  check (err, "Failed to execute kernel");
+  clFlush (ocl_queue (0));
+}
+\end{lstlisting}
+Le calcul côté GPU est lui aussi trés similaire à une variante 100\% GPU.\\
+
+La seule modification vient du fait de divisé le domaine de calcul et la différence du paradigme GPU comparé aux paradigmes CPU, ce qui m'as fait introduire une variable `startingY` qui permet de définir dans quel partie du buffer ocl commencer à lire. (J'ai utiliser cette méthode car elle permet de ne jamais réallouer de la mémoire pour le GPU malgrés l'équilibrage des chargent entre le GPU et le CPU).
+
+\newpage
+\subsection{Équilibrage des charges}
+
+\begin{lstlisting}[style=cstyle, caption=Equilibrage des charges]
+bool much_greater_than (unsigned x, unsigned y)
+{
+  double MUCH_GREATER_FACTOR = 0.;
+  char *env                  = getenv ("MUCH_GREATER_FACTOR");
+  if (env != NULL)
+    MUCH_GREATER_FACTOR = atof (env);
+  return x > (y + MUCH_GREATER_FACTOR * y);
+}
+
+  void ocl_hybrid_load_balancing (size_t global[2])
+{
+  size_t cpu_size = DIM * kernel_fp[0].h;
+  cl_int err      = 0;
+
+  if (pu_duration[1] != 0) {
+    if (much_greater_than (pu_duration[1], pu_duration[0]) &&
+        kernel_fp[1].h > TILE_H) {
+
+      // Write GPU transferred zone to CPU buffer
+      err = clEnqueueReadBuffer (ocl_queue (0), ocl_cur_buffer (0), CL_TRUE,
+                                 cpu_size, TILE_H * LINE_SIZE,
+                                 _table + cpu_size, 0, NULL, NULL);
+      check (err, "Failed to read buffer from GPU");
+
+      // Give more to CPU
+      kernel_fp[0].h += TILE_H;
+      kernel_fp[1].h -= TILE_H;
+      kernel_fp[1].y += TILE_H;
+      global[1] = kernel_fp[1].h;
+
+    } else if (much_greater_than (pu_duration[0], pu_duration[1]) &&
+               kernel_fp[0].h > TILE_H) {
+
+      // Write GPU transferred zone to CPU buffer
+      err = clEnqueueWriteBuffer (
+          ocl_queue (0), ocl_cur_buffer (0), CL_TRUE, cpu_size - DIM * TILE_H,
+          TILE_H * LINE_SIZE, _table + cpu_size - DIM * TILE_H, 0, NULL, NULL);
+      check (err, "Failed to write buffer from GPU");
+
+      // Give more to GPU
+      kernel_fp[0].h -= TILE_H;
+      kernel_fp[1].h += TILE_H;
+      kernel_fp[1].y -= TILE_H;
+      global[1] = kernel_fp[1].h;
+    }
+  }
+}
+\end{lstlisting}
+
+L'équilibrage des charges à été la partie la plus technique.
+Il faut noté que le temps que chacune des parties prends est stocké dans les variables `pu\_duration[0]` et `pu\_duration[1]` pour le CPU et le GPU respectivement.\\
+
+La prèmière partie (de la ligne 16 à 30) concerne le cas où le CPU prendrai moins de temps que le GPU et la deuxième partie (de la ligne 32 à 46) concerne le cas inverse.\\
+Dans le deux cas, je décide de transférer `TILE\_H` lignes  d'un buffer à l'autre. Pour cela, il faut:
+\begin{itemize}
+  \item Transférer les données d'un buffer à l'autre pour avoir des données à jours. (Lignes 20-22 et 35-37).
+  \item Mettre à jour le domaine de calcul. (Lignes 26-28 et 41-43).
+  \item Mettre à jour la variable `global` qui est le domaine de calcul du GPU. (Ligne 29 et 44).
+\end{itemize}
+
+\newpage
+\subsection{Échange des bords}
+L'échange des bords n'est pas très compliqué (Dans le cas de bord non épais), il suffit de copier les lignes du bord partagé du GPU vers le CPU et inversement entre chaque itération.
+\begin{lstlisting}[style=cstyle, caption=Echange des bords]
+void ocl_hybrid_exchange_borders ()
+{
+  size_t cpu_size = DIM * kernel_fp[0].h;
+  cl_int err      = 0;
+
+  // Write GPU side border to CPU buffer
+  err =
+      clEnqueueReadBuffer (ocl_queue (0), ocl_cur_buffer (0), CL_TRUE, cpu_size,
+                            LINE_SIZE, _table + cpu_size, 0, NULL, NULL);
+  check (err, "Failed to read buffer from GPU");
+
+  // Write CPU side border to GPU buffer
+  err = clEnqueueWriteBuffer (ocl_queue (0), ocl_cur_buffer (0), CL_TRUE,
+                              cpu_size - DIM, LINE_SIZE,
+                              _table + cpu_size - DIM, 0, NULL, NULL);
+  check (err, "Failed to write buffer to GPU");
+}
+\end{lstlisting}
+
+\newpage<
+\section{Problème, Limitations et Amélioration possibles}
+
+Actuellement, mon implémentation n'est pas complètes. Elle ne prend pas en charge de bords épais et ne détecte pas comment il faut les conditions de fin d'executions.\\
+Concernant les bord épais, Une piste d'implémentation serait à l'aide d'une variable d'environnement (disons `BORDER\_THICKNESS`) qui permettrait de choisir le nombre de lignes de bord partagé. Il faudrait ensuite à l'aide d'un compteur partagé ce nombre de lignes toutes les `BORDER\_THICKNESS` itérations et calculer une lignes de moins chaque itérations jusqu'à ne plus en avoir qu'une seule de partagé.\\
+Concernant la détection de fin d'excecution, il ne manque à mon implémentation que la détection côté GPU, il faudrait pour cella introduire une nouvelle variable (`change`) qui serait passé soit toutes les itérations, soit toutes les `BORDER\_THICKNESS` itérations. du GPU vers le CPU pour arreter l'execution si aucun changement n'as lieux à la fois du côté du GPU et du CPU.\\
+\vskip 1cm
+
+Par ailleurs au moment de faires mes expérience, j'ai rencontré un problème avec mon code au CREMI. N'ayant pas le temps de le résoudre, j'ai du effectuer mes expérience sur ma machine personnelle.
+
+\section{Expériences}
+J'ai effectué plusieurs expérience afin de pouvoir trouver les meilleurs paramètres pour cette version et essayer de comprendre les impacts de ces différents paramètres.\\
+\newpage
+\begin{figure}[h]
+  \centering
+  \includegraphics[width=0.9\linewidth]{variant_tiling.png}
+  \caption{Comparaison entres les différentes fonction de tiling et les versions \texttt{static} et \texttt{dynamic}.}
+  \label{fig:graph_tiling}
+\end{figure}
+J'ai d'abord voulu m'assurer de bien utiliser la bonne fonction de tiling pour la suite des experiences. Comme attendu de ma part, la version AVX était la plus rapide. Ce graphique nous donne aussi une premières tendance sur l'éfficacité du scheduling statique comparé au scheduling dynamique.
+
+\newpage
+\begin{figure}[h]
+  \centering
+  \includegraphics[width=0.9\linewidth]{more_schedules.png}
+  \caption{Comparaison des différents schedules}
+  \label{fig:graph_schedule}
+\end{figure}
+Ce graphique nous permet d'explorer plus variantes de `schedule` différents et il est assez clair ici, que le paramètre `static,1` est le meilleur dans ces conditions.
+
+\begin{figure}[h]
+  \centering
+  \includegraphics[width=0.9\linewidth]{tile_size_AVX_static.png}
+  \caption{Comparaison des tailles de tuiles}
+  \label{fig:graph_tiles_size_AVX_static}
+\end{figure}
+J'ai ensuite voulu explorér les meilleurs paramètres pour la version AVX et le scheduling statique. Le graphique nous permet d'observer les meilleures tailles de tuiles pour cette combinaison de paramètres.\\
+On remarque donc que plus les tailles sont grandes mieux sont les performances.
+
+\vskip 1cm
+
+C'est après ces expérience que j'ai implémenté l'équilibrage des charges.
+J'ai d'abord voulu savoir quel impact avait le facteur `MUCH\_GREATER\_FACTOR`.\\
+Dans le graphique suivant la variable label, correspond à ce facteur.
+
+\begin{figure}[h]
+  \centering
+  \includegraphics[width=0.9\linewidth]{load_balancing_factor.png}
+  \caption{Comparaison des tailles de tuiles}
+  \label{fig:graph_load_balancing_factor}
+\end{figure}
+
+On remarque que le facteur `MUCH\_GREATER\_FACTOR` a un impact presque linéaire sur les performances et qu'il est< préférable de choisir un facteur le plus proche de 0 possibles. Cela revient donc à ne pas avoir ce facteur en le mettant à 0.\\
+\vskip 0.5cm
+
+Avec cette information j'ai donc continuer mes expérience avec ce facteur à 0.\\
+À ce stade, je voulais être sur que la version \texttt{static,1} soit toujours la meilleure avec l'équilibrage des charges.\\
+
+\begin{figure}[h]
+  \centering
+  \includegraphics[width=0.9\linewidth]{load_balancing_0_schedules.png}
+  \caption{Comparaison des tailles de tuiles}
+  \label{fig:graph_load_balancing_0_schedule}
+\end{figure}
+
+Étonnement, on peut voir que avec l'équilibrage des charges le meilleur schedule devient \texttt{static}.\\
+
+Pour finir j'ai voulu comparé différentes tailles de tuiles avec l'équilibrage des charges. J'ai tout de même garder le schedule `static,1` en plus de `static`. en cas où il se démarquerai sur certaines tailles de tuiles.\\
+
+\begin{figure}[h]
+  \centering
+  \includegraphics[width=0.9\linewidth]{tile_size_factor_0.png}
+  \caption{Comparaison des tailles de tuiles}
+  \label{fig:tile_size_factor_0}
+\end{figure}
+
+Ce graphique comfirme dans un premier temps que le meilleur schedule est `static` avec l'équilibrage des charges.\\
+Ensuite, on voit que dans les deux cas, les meilleures tailles de tuiles sont identiques, à (64x8).\\
+
+\section{Résolution du problème au CREMI}
+Le problème que j'avais rencontré sur les machines du CREMI venait de la variable d'environnement `EASYPAPDIR`, qui au lieu de pointer vers `.../pap/projet-18/` pointait vers `.../pap/easypap-se` les hooks d'easypap allait donc chercher les fichiers objets qui se trouver dans `.../pap/easypap-se/` et pas ceux qui était compilé dans `.../pap/projet-18/`.\\
+
+Ce problème résolu, j'ai pu effectuer quelques experiences sur les machines du CREMI.
+
+\newpage
+\begin{figure}[h]
+  \centering
+  \includegraphics[width=0.9\linewidth]{cremi_schedules.png}
+  \caption{Comparaison des tailles de tuiles}
+  \label{fig:cremi_schedules}
+\end{figure}
+J'ai donc d'abord voulu voir quels schedule était le meilleurs à utiliser sur ces machines entre `static`, `static,1`, `dynamic` et `dynamic,1`.\\
+On voit bien sur ce graphique que les schedules `static,1` et `dynamic,1` sont les meilleurs mais il est difficile dee les comparé entre eux.
+
+\begin{figure}[h]
+  \centering
+  \includegraphics[width=0.9\linewidth]{cremi_schedule2.png}
+  \caption{Comparaison des tailles de tuiles}
+  \label{fig:cremi_schedules2}
+\end{figure}
+Ce graphique permet plus distinctement de comparer les schedules `static,1` et `dynamic,1`. et on observe que le meilleur schedule est toujours `static,1`. (À ce stade, il n'y as pas de différence avec ma machine personnelle).\\
+
+\newpage
+\begin{figure}[h]
+  \centering
+  \includegraphics[width=0.9\linewidth]{cremi_threads.png}
+  \caption{Comparaison des tailles de tuiles}
+  \label{fig:cremi_threads}
+\end{figure}
+Puisque je n'avais pas pu faire cette experience sur ma machine personnelle, j'ai voulu voir combien de threads était optimal pour cette variant.\\
+On remarque assez bien sur ce graphique que la valeur optimal se trouve autour de 12 threads.\\
+
+\newpage
+\begin{figure}[h]
+  \centering
+  \includegraphics[width=0.9\linewidth]{cremi_label_t12.png}
+  \caption{Comparaison des tailles de tuiles}
+  \label{fig:cremi_label_t12}
+\end{figure}
+Lun des derniers paramètres qu'il me restait à tester était le facteur `MUCH\_GREATER\_FACTOR`.\\
+On remarque sur ce graphique que le meilleur facteur est `0.5` ($x > 1.5y$).\\
+
+\newpage
+\begin{figure}[h]
+  \centering
+  \includegraphics[width=0.9\linewidth]{cremi_tile_sizes.png}
+  \caption{Comparaison des tailles de tuiles}
+  \label{fig:cremi_tile_sizes}
+\end{figure}
+Enfin, ce dernier graphique permet de comparer les meilleures tailles de tuiles. On remarque que `tilew` profite à être le plus grand possible (dans la limite du worksize du GPU) là où `tileh` fait perdre en performances s'il s'il devient trop grand. On observe donc que les meilleures tailles sont `tilew=32` et `tileh=16`.\\
+On peux essayer comprendre le fait que `tilew` soit plus efficace à 32 par rapport à la taille des tableaux AVX utilisés, et le fait que `tileh` ne soit pas trop élevé pour permettre une meilleurs distribution des charges (`tileh` étant le nombre de ligne minimum qui peux être transmis du GPU vers le CPU et inversement).
+
+\end{document}

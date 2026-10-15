@@ -1,0 +1,409 @@
+\documentclass[a4paper,12pt]{article}
+\usepackage[french]{babel}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{hyperref}
+\usepackage{graphicx}
+\usepackage{tikz}
+\usepackage{pgfplots}
+\usepackage{cite} % Pour la gestion des citations
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{float}
+
+
+\definecolor{codegray}{rgb}{0.5,0.5,0.5}
+\definecolor{codeblue}{rgb}{0.2,0.2,0.8}
+\definecolor{codegreen}{rgb}{0,0.6,0}
+\definecolor{backcolour}{rgb}{0.97,0.97,0.97}
+
+\lstdefinestyle{cstyle}{
+    backgroundcolor=\color{backcolour},   
+    commentstyle=\color{codegreen}\itshape,
+    keywordstyle=\color{codeblue}\bfseries,
+    numberstyle=\tiny\color{codegray},
+    stringstyle=\color{red},
+    basicstyle=\ttfamily\footnotesize,
+    breaklines=true,
+    frame=single,
+    rulecolor=\color{black},
+    numbers=left,
+    numbersep=5pt,
+    showstringspaces=false,
+    language=C
+}
+
+
+\lstset{
+  language=C,
+  extendedchars=true,
+  basicstyle=\small\tt,
+  lineskip=-2pt
+}
+\title{
+    \begin{tikzpicture}
+    \node at (0,0) {\includegraphics[width=0.4\columnwidth]{Universite_Bordeaux.jpg}};
+    \end{tikzpicture}        
+    \vskip 0.2in \par
+    \textbf{Le jeu de la vie - Rapport 2}
+    \vskip 0.5in \par
+    \large{
+        Projet de Programmation Parallèle
+        \vskip 0.15in
+        réalisé par
+        \vskip 0.10in 
+    }
+}
+
+\makeatletter
+\renewcommand*{\@fnsymbol}[1]{%
+  \ifcase#1
+  \or 
+  \or 
+  \or 
+  \or $\star$
+  \or $\dagger\ $
+  \or $\ddagger\ $
+  \else
+  \@ctrerr
+  \fi
+}
+\makeatother
+
+\author{
+    \textbf{Antonin Brauer}\thanks{Email: \texttt{\url{Antonin.brauer@etu.u-bordeaux.fr}}},   
+    \textbf{Mohamad Almousa}\thanks{Email: \texttt{\url{mohamad.almousa@etu.u-bordeaux.fr}}}\\[0.5cm] 
+    Responsables: Ms Pierre-André Wacrenier, Ms Raymond Namyst.\\[0.5cm]
+}
+
+\date{\today}
+
+\pgfplotsset{compat=1.18}
+
+\begin{document}
+
+\maketitle
+\newpage
+\tableofcontents
+\newpage
+\section{Introduction}
+Nous avons travaillé sur la version parallèle optimisée en évitant de calculer les zones
+stabilisées\footnote{\url{https://gforgeron.gitlab.io/pap/td/projet/Sujet/sujet.pdf}}.
+L’ensemble de notre travail repose sur les outils d’EasyPAP\footnote{\url{https://gforgeron.gitlab.io/easypap/}} développés par l’équipe pédagogique \footnote{\url{https://gitlab.emi.u-bordeaux.fr/pap-2025}}.  
+La parallélisation a été faite avec OpenMP\footnote{Open Multi-Processing - ,\url{https://www.openmp.org/}}.
+\vspace{5mm}
+\section{Étape 2 : Optimisation du calcul des tuiles}
+\vspace{5mm}
+
+\subsection{Optimisation de la fonction \texttt{life\_do\_tile}}
+\vspace{5mm}
+La fonction \texttt{life\_do\_tile\_default} implémente la logique du jeu de la vie de Conway sur une portion de la grille définie par les coordonnées $(x, y)$ et les dimensions $(\texttt{width}, \texttt{height})$. Cette version naïve effectue plusieurs vérifications et boucles imbriquées, ce qui rend son exécution coûteuse, notamment en raison de l'appel répété à la fonction \texttt{cur\_table(i, j)} et du calcul du nombre de voisins vivants à l'aide de deux boucles supplémentaires.
+\vspace{5mm}
+\begin{lstlisting}[style=cstyle, caption=Version initiale non optimisée]
+int life_do_tile_default(int x, int y, int width, int height)
+{
+
+
+  ...
+
+
+}
+\end{lstlisting}
+\vspace{5mm}
+Cette version a été optimisée dans \texttt{life\_do\_tile\_opt} en supprimant les boucles internes pour le calcul du nombre de voisins vivants. Les appels à \texttt{cur\_table} sont remplacés par une sommation explicite des 8 cellules voisines, ce qui permet de réduire le nombre d'instructions et d'améliorer la performance.
+\vspace{5mm}
+\begin{lstlisting}[style=cstyle, caption=Version optimisée]
+int life_do_tile_opt(int x, int y, int width, int height)
+{
+  int change = 0;
+
+  for (int i = y; i < y + height; i++)
+    for (int j = x; j < x + width; j++) {
+      unsigned n  = 0;
+      unsigned me = cur_table (i, j);
+
+      n = cur_table (i - 1, j - 1) + cur_table (i - 1, j) +
+          cur_table (i - 1, j + 1) + cur_table (i, j - 1) +
+          cur_table (i, j + 1) + cur_table (i + 1, j - 1) +
+          cur_table (i + 1, j) + cur_table (i + 1, j + 1);
+
+      change            = ((me && n != 2 && n != 3) || (!me && n == 3)) & 1;
+      me                = (me ^ change) & 1;
+      next_table (i, j) = me;
+    }
+  return change;
+}
+\end{lstlisting}
+
+L'optimisation repose également sur l'utilisation d'opérations logiques (\texttt{\&} et \texttt{\^{}}) à la place de structures conditionnelles plus coûteuses. Cette simplification permet de tirer parti du parallélisme offert par certaines architectures matérielles et d'améliorer l'efficacité du cache en réduisant le nombre d'instructions de contrôle.
+
+\bigskip
+
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=1\textwidth]{6.pdf}
+  \caption{Comparaison des performances entre la version \textit{default} et la version \textit{opt} en fonction de \texttt{tilew} et \texttt{tileh}}
+  \label{fig:perf_comparison}
+\end{figure}
+\paragraph{Version \texttt{default}} On observe que les temps d'exécution diminuent lorsque la taille des tuiles augmente. Pour les plus petites tuiles (\texttt{tilew} = 2 ou 4), le temps est élevé (jusqu'à 7456), en raison de l'overhead causé par la gestion fréquente des bordures et des nombreuses boucles internes. En revanche, pour des tailles de tuiles plus grandes (\texttt{tilew} = 32), les temps chutent autour de 3480.
+
+\paragraph{Version \texttt{opt}} L’optimisation montre un gain significatif, particulièrement sur les petites tailles de tuiles. Avec \texttt{tilew} = 2, on observe un temps de 5997 contre 7456 pour la version par défaut. Toutefois, pour \texttt{tilew} $\geq$ 16, l'écart entre les deux versions se réduit et les performances tendent à se stabiliser.
+
+\paragraph{Conclusion} Cette étude montre que l’optimisation apporte un bénéfice significatif sur les petites tuiles, mais que ce gain s'atténue pour les grandes tuiles en raison de limitations liées à l’architecture mémoire.
+
+\subsection{Motivation de l’évaluation paresseuse}
+
+La figure \ref{fig:trace_static} illustre la répartition du travail entre threads pour une exécution parallèle classique (\texttt{ompfor}) du jeu de la vie, sans évaluation paresseuse. Chaque couleur représente une tuile traitée par un thread donné.
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=0.9\linewidth]{trace.png}
+    \caption{Répartition du travail entre threads sur un domaine de taille $512 \times 512$ avec \texttt{ompfor} (tuiles $32 \times 32$).}
+    \label{fig:trace_static}
+\end{figure}
+
+On remarque que l’ensemble des threads calcule systématiquement l’intégralité des tuiles, indépendamment de l’évolution locale du jeu. Même lorsque des zones sont stables et n’évoluent plus (zones mortes ou oscillantes), elles sont recalculées à chaque itération. Cela entraîne :
+\begin{itemize}
+    \item une perte d’efficacité lorsque certaines régions ne nécessitent plus de calcul ;
+    \item une surcharge mémoire et des défauts de cache dus à l’éparpillement spatial ;
+    \item une utilisation sous-optimale des ressources de calcul, surtout lorsque l’équilibre entre les threads n’est pas respecté.
+\end{itemize}
+
+Ces limitations justifient la mise en place d’une stratégie d’évaluation paresseuse, où seules les tuiles potentiellement affectées par des changements sont recalculées à chaque itération. Cette approche permet de concentrer les efforts de calcul sur les régions dynamiques du domaine, améliorant ainsi l’efficacité globale de l’algorithme.
+
+
+\subsection{Implémentation de \texttt{life\_compute\_lazy()}}
+
+La fonction \texttt{life\_compute\_lazy()} implémente une stratégie d’évaluation paresseuse en ne recalculant que les tuiles actives ou leurs voisines immédiates. Voici l’algorithme détaillé correspondant à cette approche :
+
+\paragraph{1. Initialisation des tuiles}
+
+Au début de chaque itération :
+\begin{itemize}
+  \item Le tableau \texttt{new\_active} est réinitialisé à \texttt{false} pour toutes les tuiles.
+\end{itemize}
+
+\paragraph{2. Traitement des bords}
+
+Les tuiles situées sur les bords du domaine sont systématiquement recalculées :
+\begin{itemize}
+  \item Les colonnes de gauche et de droite sont traitées via \texttt{do\_tile()}.
+  \item Les lignes du haut et du bas également.
+  \item Ces tuiles de bordure sont ensuite marquées comme actives dans \texttt{new\_active} pour la prochaine itération.
+\end{itemize}
+
+\paragraph{3. Traitement des tuiles internes}
+
+Pour les tuiles internes (hors bordures) :
+\begin{itemize}
+  \item Seules les tuiles marquées actives dans \texttt{active} sont évaluées.
+  \item Si une modification est détectée après un appel à \texttt{do\_tile()}, la tuile courante et ses 8 voisines sont marquées actives dans \texttt{new\_active} pour l’itération suivante.
+\end{itemize}
+
+\paragraph{4. Arrêt anticipé}
+
+Si aucune tuile n’a été modifiée au cours de l’itération (\texttt{change} vaut 0), l’algorithme s’arrête prématurément avant d’atteindre la limite de \texttt{nb\_iter}.
+
+\paragraph{5. Propagation des activations}
+
+En fin d’itération :
+\begin{itemize}
+  \item Le tableau \texttt{new\_active} est copié dans \texttt{active} pour préparer l’itération suivante.
+\end{itemize}
+
+
+
+\vspace{10mm}
+\subsubsection{Comparaison des performances : \texttt{lazy} vs \texttt{tiled}}
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=0.9\textwidth]{cart1.pdf}
+    \caption{Comparaison des performances entre l'implémentation \texttt{lazy} et les versions \texttt{tiled} (default et opt) selon différentes tailles de tuiles (\texttt{tilew} et \texttt{tileh}).}
+    \label{fig:perf}
+\end{figure}
+
+\paragraph{Analyse}
+
+Sur la figure~\ref{fig:perf}, on observe les temps d'exécution pour 100 itérations du kernel \texttt{life} selon différentes tailles de tuiles, sur une grille de taille 256x256.
+
+\begin{itemize}
+    \item \textbf{Lazy} : L’implémentation paresseuse montre une forte dépendance à la taille des tuiles. Les plus petites tailles (4x4, 8x8) donnent de bien meilleures performances, tandis que de grandes tuiles (64x64 et plus) dégradent le résultat.
+    \item \textbf{Tiled} : Les performances sont relativement stables et peu sensibles à la taille des tuiles (autour de 40 à 45 en moyenne), sauf pour les très (petites et grandes) tuiles (où l’on observe une dégradation importante).
+
+\end{itemize}
+
+\paragraph{Conclusion}
+
+L’approche \texttt{lazy} est efficace mais sensible au choix de la taille de tuile.
+
+
+\subsubsection{Analyse du speedup}
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=0.75\textwidth]{cart2.pdf}
+    \caption{Speedup en fonction de la taille des tuiles pour les variantes \texttt{lazy} et \texttt{tiled} avec les configurations \texttt{opt} et \texttt{default}.}
+    \label{fig:speedup_comparison}
+\end{figure}
+
+\paragraph{Analyse des résultats}
+
+Sur la figure~\ref{fig:speedup_comparison}, on observe comment évolue le speedup relatif (par rapport à une baseline) selon la taille de tuile et la variante utilisée.
+
+\begin{itemize}
+    \item \textbf{Lazy | opt} : Le speedup est maximum pour les plus petites tailles de tuiles (4x4 et 8x8), puis décroît rapidement à mesure que la taille augmente, ce qui montre une perte d’efficacité du mécanisme lazy lorsque les blocs deviennent trop grands.
+    \item \textbf{Lazy | default} : Le comportement est similaire mais avec des performances globalement moins élevées. L’approche par défaut semble moins adaptée aux très petites tuiles que la version optimisée.
+    \item \textbf{Tiled | opt} : Les performances sont relativement constantes avec un léger avantage pour les tuiles de taille intermédiaire (8x8 à 16x16), ce qui traduit une bonne exploitation du cache.
+    \item \textbf{Tiled | default} : Très stable mais avec un speedup plus faible, indiquant que cette version est moins sensible aux tailles mais également moins efficace globalement.
+\end{itemize}
+
+\paragraph{Observation générale}
+
+L’implémentation \texttt{lazy} est fortement dépendante de la granularité des tuiles, et atteint son meilleur rendement sur de petits blocs. À l’inverse, l’approche \texttt{tiled opt} affiche une meilleure robustesse avec un comportement plus prévisible.
+
+\subsection{Implémentation de \texttt{life\_compute\_omplazy()}}
+
+La fonction \texttt{life\_compute\_omplazy()} est la version parallélisée avec OpenMP de l’algorithme \texttt{lazy}. Cette version utilise plusieurs directives \texttt{pragma} pour exploiter les ressources multicœurs et améliorer le temps d’exécution global.
+
+\paragraph{1. Initialisation parallèle}
+
+Le tableau \texttt{new\_active} est réinitialisé en parallèle via un \texttt{\#pragma omp parallel for collapse(2)} pour couvrir l’ensemble des tuiles (\texttt{TILES\_X} $\times$ \texttt{TILES\_Y}).
+
+\paragraph{2. Traitement des bordures}
+
+Les tuiles situées sur les bordures sont traitées avec deux boucles parallèles distinctes :
+\begin{itemize}
+  \item Une boucle parallèle sur \texttt{j} traite les colonnes de gauche et de droite (\texttt{x = 0} et \texttt{x = DIM - TILE\_W}).
+  \item Une boucle parallèle sur \texttt{i} s’occupe des lignes du haut et du bas (\texttt{y = 0} et \texttt{y = DIM - TILE\_H}).
+\end{itemize}
+Pour chaque tuile bordure traitée, les cases associées dans \texttt{new\_active} sont également mises à jour en parallèle.
+
+\paragraph{3. Traitement des tuiles internes}
+
+Les tuiles internes sont parcourues avec une boucle \texttt{\#pragma omp parallel for collapse(2)} sur \texttt{i} et \texttt{j}. 
+\begin{itemize}
+  \item Seules les tuiles actives sont traitées (\texttt{active[j][i] == true}).
+  \item Lorsqu’une modification est détectée via \texttt{do\_tile()}, la tuile courante et ses 8 voisines sont marquées comme actives dans \texttt{new\_active} pour la prochaine itération.
+\end{itemize}
+
+\paragraph{4. Synchronisation}
+
+\begin{itemize}
+  \item Le drapeau global \texttt{change} est mis à jour en parallèle à l’aide de la clause \texttt{reduction(|:change)} pour accumuler les changements détectés.
+  \item Les écritures sur \texttt{new\_active} sont sécurisées sans synchronisation fine explicite, car chaque thread écrit sur des régions distinctes du tableau.
+\end{itemize}
+
+\paragraph{5. Arrêt conditionnel}
+
+Comme dans la version séquentielle, l’algorithme s’interrompt de manière anticipée dès qu’aucune tuile n’est modifiée à l’issue d’une itération.
+
+\paragraph{6. Préparation de l’itération suivante}
+
+Enfin, le tableau \texttt{new\_active} est copié dans \texttt{active} en parallèle pour préparer l’itération suivante.
+
+\paragraph{Conclusion}
+
+Cette version parallèle maximise l’occupation des threads via l’usage combiné de \texttt{collapse(2)} et de \texttt{reduction}, tout en évitant les barrières inutiles pour optimiser le temps d’exécution.
+
+
+\subsubsection{Comparaison \texttt{ompfor} vs \texttt{omplazy}}
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.6\textwidth]{cart3.pdf}
+  \caption{Speedup obtenu pour \texttt{tilew} = 4 et \texttt{tileh} = 4 en fonction du nombre de threads (machine \texttt{dali}, grille 1024x1024, \texttt{tiling=opt}).}
+  \label{fig:speedup_tile4x4}
+\end{figure}
+
+\paragraph{Analyse}
+
+La figure~\ref{fig:speedup_tile4x4} présente le speedup mesuré pour une configuration avec des tuiles très fines (4x4) et un tuilage optimisé. On observe que :
+\begin{itemize}
+    \item La version \texttt{omplazy} offre un meilleur speedup que \texttt{ompfor} dès les premiers threads.
+    \item Le gain devient significatif à partir de 3 threads et continue de croître avec le parallélisme.
+    \item La granularité fine (tuiles 4x4) semble mieux exploitée par l’approche \texttt{lazy} grâce à la réduction des calculs inutiles dans les zones stables.
+\end{itemize}
+
+Cette configuration illustre bien l’intérêt d’une stratégie paresseuse dans le cas de petites tuiles et de situations où la charge de travail n’est pas uniformément répartie sur la grille.
+
+\subsubsection{Impact de l’augmentation de la taille des tuiles}
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.6\textwidth]{cart4.pdf}
+  \caption{Speedup pour \texttt{tilew} = 32 et \texttt{tileh} = 64 en fonction du nombre de threads.}
+  \label{fig:speedup_tile32x64}
+\end{figure}
+
+\paragraph{Analyse}
+
+La figure~\ref{fig:speedup_tile32x64} montre que lorsque la taille des tuiles augmente :
+\begin{itemize}
+    \item Le speedup global est moins élevé que dans le cas des petites tuiles (4x4).
+    \item Les courbes de \texttt{ompfor} et \texttt{omplazy} sont plus proches, avec un léger avantage à \texttt{omplazy} pour les plus faibles nombres de threads.
+    \item L’augmentation de \texttt{tilew} et \texttt{tileh} réduit l’efficacité du modèle \texttt{lazy} : le gain dû à la paresse diminue car de larges tuiles recouvrent davantage de zones "mortes" et entraînent des recalculs inutiles.
+\end{itemize}
+
+\paragraph{Conclusion}
+
+L’algorithme \texttt{omplazy} est plus avantageux pour des tuiles de petite taille qui permettent une meilleure localisation des mises à jour et une réduction des calculs. Lorsque les tuiles deviennent plus grosses, la charge de travail par tuile augmente, mais la granularité plus faible limite les bénéfices du modèle paresseux.
+
+
+
+%------------%
+\section{Performances}
+\subsection{Variantes}
+
+Voici les courbes de speedups obtenues avec \texttt{life\_compute\_lazy()}, on remarque que c’est dans plusieur configurations, la version \texttt{static} qui performe le mieux.
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=1 \textwidth ,height=0.3 \textheight]{11.pdf}
+  \caption{Comparaison entre \texttt{static} et \texttt{dynamic}}
+  \label{fig:perf_comparison}
+\end{figure}
+
+\paragraph{Observations}
+L’organisation des cœurs en deux groupes de 20 laissait penser que la courbe serait
+croissante sauf lors du passage entre 20 à 25 threads, à cause de l’impossibilité de garder
+tous les threads sur un même processeur. On observe bien un ralentissement dans certains
+cas, mais avant 25 threads. Peut-être que même à 24 threads, le système n’arrive pas à
+bien ordonnancer et donc l’effet de seuil apparaît avant.
+
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=1 \textwidth ]{meme.pdf}
+  \caption{Comparaison entre \texttt{dynamic,N} et \texttt{dynamic}}
+  \label{fig:perf_comparison}
+\end{figure}
+
+
+Les différentes expérimentations montrent que la planification \texttt{dynamic} est globalement plus efficace que les autres variantes testées (\texttt{dynamic,8}). Cette stratégie s’adapte mieux à l’irrégularité du calcul induite par l’évaluation paresseuse de la version \texttt{omplazy}.
+En effet, l’approche paresseuse crée des déséquilibres de charge entre les threads, certaines tuiles étant stables et donc plus rapides à traiter que d’autres. La planification dynamique permet aux threads de récupérer de nouvelles tuiles à la volée, réduisant ainsi l’idle time (temps d’attente) et maximisant l’utilisation des cœurs disponibles.
+\subsection{Cartes de chaleur}
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=1 \textwidth ]{data8192.pdf}
+  \caption{Comparaison de cartes de chaleur entre \texttt{dynamic} et \texttt{static}}
+  \label{fig:perf_comparison}
+\end{figure}
+Les performances dégradées observées pour \texttt{dynamic} avec des petites tuiles pourraient s’expliquer par une surcharge liée à l’éparpillement spatial des tuiles entre threads, entraînant des défauts de cache et un déséquilibre de charge. En revanche, avec \texttt{static}, l’assignation régulière et contiguë des tuiles favorise une meilleure localité mémoire. L’écart de performance se réduit à mesure que la taille des tuiles augmente (\texttt{tileh} $\geq 256$), où l’effet du cache devient moins critique. Toutefois, l’interprétation reste partiellement limitée par la faible granularité de la mesure et la variabilité induite par des tuiles de grande taille.
+
+
+\section{En réflexion}
+\subsection{clang vs GCC}
+Dans nos essais sur les autres exercices nous avons remarqué que les performances de
+clang pouvaient être jusqu’à 3× meilleures, grâce à des optimisations que GCC ne fait
+pas automatiquement. Nous souhaiterions donc à terme ajouter une nouvelle dimension
+à nos benchmarks en intégrant ce nouveau compilateur.
+
+
+
+
+
+
+\end{document}

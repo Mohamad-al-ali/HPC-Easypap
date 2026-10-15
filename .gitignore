@@ -1,0 +1,9 @@
+public
+.vscode
+*.pdf
+*.csv
+*.log
+*.out
+*.pdf 
+*.toc
+*.aux
